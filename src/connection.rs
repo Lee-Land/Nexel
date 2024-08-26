@@ -1,17 +1,15 @@
-use std::io::{Cursor, ErrorKind};
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-use bytes::{BytesMut};
+use std::net::{IpAddr, SocketAddr};
+use bytes::BytesMut;
 use tokio::io;
-use tokio::io::{AsyncReadExt, BufWriter};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncWriteExt, BufWriter};
+use tokio::net::{TcpStream};
 use crate::error::Error;
-use crate::protocol;
-use crate::protocol::{NVer, Reply, ReplyAuth, ReplyCmd, ReqCmd, Request};
-use crate::Result;
+use crate::{protocol, Result};
+use crate::configuration::{Plat, REMOTE_SERVER_ADDR};
+use crate::protocol::{Reply, ReqCmd, ReqFrame, Request};
 
 pub struct Connection {
     stream: BufWriter<TcpStream>,
-    buffer: BytesMut,
     id: String,
 }
 
@@ -19,167 +17,124 @@ impl Connection {
     pub fn new(socket: TcpStream) -> Connection {
         Connection {
             stream: BufWriter::new(socket),
-            buffer: BytesMut::with_capacity(128),
             id: uuid::Uuid::new_v4().to_string(),
         }
     }
 
     pub async fn run(mut self) -> Result<()> {
-        let n_ver = self.stream.read_u8().await?;
-        match n_ver {
-            4 => {
-                self.process_request_trip(NVer::V4).await?;
-                Ok(())
-            }
-            5 => {
-                self.process_auth_request_trip().await?;
-                let _ = self.stream.read_u8().await?;
-                self.process_request_trip(NVer::V5).await?;
-                Ok(())
-            }
-            _ => return Err(Error::VnUnsupported(n_ver))
-        }
-    }
-
-    async fn process_auth_request_trip(&mut self) -> Result<()> {
-        if let Some(_) = self.parse_while_read(protocol::v5::parse_auth_req).await? {
-            let reply = ReplyAuth { method: protocol::Method::None };
-            reply.send(&mut self.stream).await?;
-        }
-        Ok(())
-    }
-
-    async fn process_request_trip(mut self, ver: NVer) -> Result<()> {
-        let request = match ver {
-            NVer::V4 => self.parse_while_read(protocol::v4::parse_req).await?,
-            NVer::V5 => self.parse_while_read(protocol::v5::parse_req).await?,
-        };
-        if let Some(req) = request {
-            match req.cmd {
-                ReqCmd::Connect => {
-                    println!("[CONNECT-Request] accepted a client {} request that info is {:?}", self.id, req);
-                    let (reply, socket) = self.process_connect(req).await?;
-                    reply.send(&mut self.stream).await?;
-                    println!("[CONNECT-Reply] replied the client {} with info {:?}", self.id, reply);
-                    if let Some(socket) = socket {
-                        establish_pipe(self.stream.into_inner(), socket).await;
-                    }
-                }
-                ReqCmd::Bind => {
-                    println!("[BIND-Request] accepted a client {} request that info is {:?}", self.id, req);
-                    let (reply, listener) = self.process_bind(req).await?;
-                    reply.send(&mut self.stream).await?;
-                    println!("[BIND-Reply replied the client {} with info {:?}", self.id, reply);
-                    if let Some(listener) = listener {
-                        let (sock, addr) = listener.accept().await?;
-                        _ = sock;
-                        _ = addr;
-                    }
-                }
-                ReqCmd::Udp => {
-                    if ver == NVer::V4 {
-                        return Err(Error::Other(String::from("v4 doesn't support cmd udp")));
-                    }
-                    return Err(Error::NotImplemented);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    async fn parse_while_read<F, T>(&mut self, mut f: F) -> Result<Option<T>>
-        where
-            F: FnMut(&mut Cursor<&[u8]>) -> Result<T> {
+        let mut authorized = false;
         loop {
-            let mut cursor = Cursor::new(&self.buffer[..]);
-            let parsed = match f(&mut cursor) {
-                Ok(frame) => { Ok(Some(frame)) }
-                Err(e) => {
-                    match e {
-                        Error::Incomplete => Ok(None),
-                        _ => Err(e)
+            let mut parser = protocol::Parser::new(self.stream.get_mut());
+            let parsed_ret = parser.recv_and_parse_req(authorized).await;
+            let mut reply = Reply::new();
+            match parsed_ret {
+                Ok(req_frame) => {
+                    if req_frame.is_none() {
+                        break;
+                    }
+                    match req_frame.unwrap() {
+                        ReqFrame::Auth(req) => {
+                            println!("[AUTH-Request] accepted a client {} auth request that info is {:?}", self.id, req);
+                            self.reply(reply.auth(0).await?).await?;
+                            authorized = true;
+                            continue;
+                        }
+                        ReqFrame::Req(req) => {
+                            self.process(&mut reply, &req, Plat::Client).await?;
+                            break;
+                        }
                     }
                 }
-            };
-            if let Some(frame) = parsed? {
-                return Ok(Some(frame));
+                Err(err) => {
+                    self.reply(reply.error(&err).await?).await?;
+                    return Err(err);
+                }
             }
+        }
+        Ok(())
+    }
 
-            if 0 == self.stream.read_buf(&mut self.buffer).await? {
-                return if self.buffer.is_empty() {
-                    Ok(None)
+    pub async fn run_on_server(mut self) -> Result<()> {
+        let mut parser = protocol::Parser::new(self.stream.get_mut());
+        let parsed_ret = parser.recv_and_parse_req(true).await;
+        let mut reply = Reply::new();
+        match parsed_ret {
+            Ok(req) => {
+                if let Some(ReqFrame::Req(req)) = req {
+                    self.process(&mut reply, &req, Plat::Server).await?;
+                    reply.set_ver(req.ver);
+                }
+                Ok(())
+            }
+            Err(err) => {
+                self.reply(reply.error(&err).await?).await?;
+                Err(err)
+            }
+        }
+    }
+
+    async fn process(mut self, reply: &mut Reply, req: &Request, plat: Plat) -> Result<()> {
+        reply.set_ver(req.ver);
+        let process_ret = self.process_request(&req, plat).await;
+        match process_ret {
+            Ok((mut remote, connect_remote)) => {
+                if connect_remote {
+                    let raw = req.raw().await?;
+                    let mut buffer = BytesMut::from(&raw[..]);
+                    remote.write_buf(&mut buffer).await?;
+                    remote.flush().await?;
                 } else {
-                    Err(Error::IoErr(io::Error::from(ErrorKind::ConnectionReset)))
-                };
-            }
-        }
-    }
-
-    async fn process_connect(&mut self, req: Request) -> Result<(Reply, Option<TcpStream>)> {
-        let mut reply = initial_reply_by_req(&req);
-        match TcpStream::connect(SocketAddr::new(req.dst_ip.unwrap(), req.dst_port)).await {
-            Ok(sock) => {
-                Ok((reply, Some(sock)))
-            }
-            Err(e) => {
-                reply.cmd = get_cmd_by_error(e.kind(), req.ver);
-                Ok((reply, None))
-            }
-        }
-    }
-
-    async fn process_bind(&mut self, req: Request) -> Result<(Reply, Option<TcpListener>)> {
-        let mut reply = initial_reply_by_req(&req);
-        match TcpListener::bind(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)).await {
-            Ok(ls) => {
-                match ls.local_addr() {
-                    Ok(addr) => reply.bind_port = addr.port(),
-                    Err(e) => {
-                        reply.cmd = get_cmd_by_error(e.kind(), req.ver);
-                    }
+                    self.reply(reply.successful((req.a_type, req.dst_addr, req.dst_domain.clone()), req.dst_port).await?).await?;
+                    println!("[CONNECT-Reply] {} successful", self.id);
                 }
-                Ok((reply, Some(ls)))
+                establish_pipe(self.stream.into_inner(), remote).await;
+                Ok(())
             }
             Err(e) => {
-                reply.cmd = get_cmd_by_error(e.kind(), req.ver);
-                Ok((reply, None))
+                self.reply(reply.error(&e).await?).await?;
+                Ok(())
             }
         }
     }
-}
 
-fn initial_reply_by_req(req: &Request) -> Reply {
-    Reply {
-        ver: req.ver,
-        cmd: match req.ver {
-            NVer::V4 => ReplyCmd::V4(protocol::v4::ReplyCmd::Successful),
-            NVer::V5 => ReplyCmd::V5(protocol::v5::ReplyCmd::Successful),
-        },
-        rsv: 0,
-        bind_addr: req.dst_ip,
-        domain: None,
-        bind_port: req.dst_port,
+    async fn process_request(&self, req: &Request, plat: Plat) -> Result<(TcpStream, bool)> {
+        match req.cmd {
+            ReqCmd::Connect => {
+                println!("[CONNECT-Request] accepted a client {} request that info is {:?}", self.id, req);
+                if let Some(ip) = req.dst_addr {
+                    if plat == Plat::Client {
+                        // todo no local or no in country
+                        let is_local = match ip {
+                            IpAddr::V4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+                            IpAddr::V6(ip) => ip.is_loopback(),
+                        };
+                        if !is_local || true {
+                            return Ok((TcpStream::connect(REMOTE_SERVER_ADDR).await?, true));
+                        }
+                    }
+                    Ok((TcpStream::connect(SocketAddr::new(ip, req.dst_port)).await?, false))
+                } else if let Some(domain) = &req.dst_domain {
+                    if plat == Plat::Client {
+                        return Ok((TcpStream::connect(REMOTE_SERVER_ADDR).await?, true));
+                    }
+                    let addr = format!("{}:{}", domain, req.dst_port);
+                    Ok((TcpStream::connect(addr).await?, false))
+                } else {
+                    Err(Error::AddrTypeUnsupported(req.ver as u8))
+                }
+            }
+            ReqCmd::Bind => {
+                Err(Error::NotImplemented)
+            }
+            ReqCmd::Udp => {
+                Err(Error::NotImplemented)
+            }
+        }
     }
-}
-
-fn get_cmd_by_error(e: ErrorKind, ver: NVer) -> ReplyCmd {
-    match ver {
-        NVer::V4 => ReplyCmd::V4(get_cmd_by_v4(e)),
-        NVer::V5 => ReplyCmd::V5(get_cmd_by_v5(e)),
-    }
-}
-
-fn get_cmd_by_v4(e: ErrorKind) -> protocol::v4::ReplyCmd {
-    match e {
-        ErrorKind::ConnectionRefused | ErrorKind::ConnectionReset => protocol::v4::ReplyCmd::ConnectionRefused,
-        _ => protocol::v4::ReplyCmd::ConnectionFailed,
-    }
-}
-
-fn get_cmd_by_v5(e: ErrorKind) -> protocol::v5::ReplyCmd {
-    match e {
-        ErrorKind::ConnectionRefused | ErrorKind::ConnectionReset => protocol::v5::ReplyCmd::ConnectionRefused,
-        _ => protocol::v5::ReplyCmd::ServerError,
+    async fn reply(&mut self, buf: &[u8]) -> Result<()> {
+        self.stream.write(buf).await?;
+        self.stream.flush().await?;
+        Ok(())
     }
 }
 
@@ -190,7 +145,7 @@ async fn establish_pipe(a: TcpStream, b: TcpStream) {
         match io::copy(&mut a_reader, &mut b_writer).await {
             Ok(n) => {
                 println!("copied bytes {n} data into b from a");
-            },
+            }
             Err(e) => {
                 eprintln!("failed to copy, error: {}", e);
             }
@@ -199,7 +154,7 @@ async fn establish_pipe(a: TcpStream, b: TcpStream) {
     match io::copy(&mut b_reader, &mut a_writer).await {
         Ok(n) => {
             println!("copied bytes {n} data into a from b");
-        },
+        }
         Err(e) => {
             eprintln!("failed to copy, error: {}", e);
         }
@@ -209,7 +164,8 @@ async fn establish_pipe(a: TcpStream, b: TcpStream) {
 #[cfg(test)]
 mod tests {
     use bytes::{Buf, BytesMut};
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
     use tokio::select;
     use crate::error::Error;
 
@@ -221,8 +177,9 @@ mod tests {
     }
 
     fn call_printer<F>(f: F, n: i32) -> i32
-        where
-            F: Fn(i32) -> i32 {
+    where
+        F: Fn(i32) -> i32,
+    {
         f(n)
     }
 
@@ -276,5 +233,20 @@ mod tests {
         assert_eq!(&b"hello"[..], &writer[..]);
         println!("{:?}", l);
         println!("{:?}", l2);
+    }
+
+    #[tokio::test]
+    async fn test_client_v5() {
+        let mut socket = TcpStream::connect("127.0.0.1:3456").await.unwrap();
+        let buf: Vec<u8> = vec![0x05, 0x01, 0x00];
+        socket.write(buf.as_slice()).await.unwrap();
+        let mut read_buf: Vec<u8> = vec![];
+        socket.read_buf(&mut read_buf).await.unwrap();
+        println!("{:?}", read_buf);
+        let buf: Vec<u8> = vec![5, 1, 0, 1, 0xc0, 0xa8, 1, 1, 0x22, 0xc3];
+        socket.write(buf.as_slice()).await.unwrap();
+        let mut read_buf: Vec<u8> = vec![];
+        socket.read_buf(&mut read_buf).await.unwrap();
+        println!("{:?}", read_buf);
     }
 }

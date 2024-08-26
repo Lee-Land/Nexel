@@ -5,7 +5,7 @@ use socks_proxy::connection::Connection;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    let local_addr = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 8899);
+    let local_addr = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 3456);
     let listener = TcpListener::bind(local_addr).await?;
 
     loop {

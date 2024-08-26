@@ -6,10 +6,10 @@ use tokio::io;
 pub enum Error {
     Incomplete,
     VnUnsupported(u8),
-    UnknownCmd(u8),
+    UnknownCmd(u8), // the value is version
     NotIpV4,
     NotIpV6,
-    AddrTypeUnsupported,
+    AddrTypeUnsupported(u8),
     NotImplemented,
     ServerRefusedAuth,
     IoErr(io::Error),
@@ -21,10 +21,10 @@ impl Display for Error {
         match self {
             Error::Incomplete => write!(f, "the frame that read from socket was incomplete"),
             Error::VnUnsupported(vn) => write!(f, "the number {vn} of version was not supported"),
-            Error::UnknownCmd(cmd) => write!(f, "the cmd {cmd} was not supported"),
+            Error::UnknownCmd(_) => write!(f, "the cmd was not supported"),
             Error::NotIpV4 => write!(f, "the ipv4 address format was invalid"),
             Error::NotIpV6 => write!(f, "the ipv6 address format was invalid"),
-            Error::AddrTypeUnsupported => write!(f, "the addr type was invalid"),
+            Error::AddrTypeUnsupported(_) => write!(f, "the addr type was invalid"),
             Error::NotImplemented => write!(f, "protocol was not implemented"),
             Error::ServerRefusedAuth => write!(f, "server has refused the client auth"),
             Error::IoErr(e) => write!(f, "{}", e),
