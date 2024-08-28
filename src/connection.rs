@@ -72,11 +72,11 @@ impl<RW: AsyncRead + AsyncWrite + Unpin> Connection<RW> {
         match self.process_request(&req, plat).await {
             Ok((mut remote, connect_remote)) => {
                 if connect_remote {
+                    let mut tls_remote = tls::connect(remote, REMOTE_SERVER_DOMAIN).await?;
                     let raw = req.raw().await?;
                     let mut buffer = BytesMut::from(&raw[..]);
-                    remote.write_buf(&mut buffer).await?;
-                    remote.flush().await?;
-                    let mut tls_remote = tls::connect(remote, REMOTE_SERVER_DOMAIN).await?;
+                    tls_remote.write_buf(&mut buffer).await?;
+                    tls_remote.flush().await?;
                     connect_two_way(self.stream.get_mut(), &mut tls_remote).await?;
                 } else {
                     self.reply(reply.successful((req.a_type, req.dst_addr, req.dst_domain.clone()), req.dst_port).await?).await?;
