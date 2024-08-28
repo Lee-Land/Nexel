@@ -1,8 +1,7 @@
 use std::io::{BufRead, Cursor, ErrorKind};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use bytes::{Buf, BytesMut};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
 use crate::error::Error;
 use crate::Result;
 
@@ -223,12 +222,12 @@ async fn write_addr(writer: &mut BufWriter<Vec<u8>>, addr: (AType, Option<IpAddr
     }
 }
 
-pub struct Parser<'a> {
-    socket: &'a mut TcpStream,
+pub struct Parser<'a, RW> {
+    socket: &'a mut RW,
 }
 
-impl Parser<'_> {
-    pub fn new(socket: &mut TcpStream) -> Parser {
+impl<RW: AsyncRead + AsyncWrite + Unpin> Parser<'_, RW> {
+    pub fn new(socket: &mut RW) -> Parser<RW> {
         Parser { socket }
     }
     pub async fn recv_and_parse_req(&mut self, authorized: bool) -> Result<Option<ReqFrame>> {
@@ -460,7 +459,7 @@ mod test {
             ver: Ver::V5,
             cmd: ReqCmd::Connect,
             rsv: 0,
-            dst_domain: Some(String::from("nexel.cc")),
+            dst_domain: Some(String::from("Nexel.cc")),
             dst_addr: None,
             dst_port: 8899,
             a_type: AType::Domain,
@@ -485,7 +484,7 @@ mod test {
 
     #[tokio::test]
     async fn connect_to_domain() {
-        match TcpStream::connect("nexel.cc:80").await {
+        match TcpStream::connect("Nexel.cc:80").await {
             Ok(_) => assert!(true),
             Err(_) => assert!(false)
         }

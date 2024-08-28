@@ -1,38 +1,33 @@
 use std::net::{IpAddr, SocketAddr};
 use bytes::BytesMut;
 use tokio::io;
-use tokio::io::{AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufWriter};
 use tokio::net::{TcpStream};
 use crate::error::Error;
-use crate::{protocol, Result};
-use crate::configuration::{Plat, REMOTE_SERVER_ADDR};
+use crate::{protocol, tls, Result};
+use crate::configuration::{Plat, REMOTE_SERVER_ADDR, REMOTE_SERVER_DOMAIN};
 use crate::protocol::{Reply, ReqCmd, ReqFrame, Request};
 
-pub struct Connection {
-    stream: BufWriter<TcpStream>,
+pub struct Connection<RW> {
+    stream: BufWriter<RW>,
     id: String,
 }
 
-impl Connection {
-    pub fn new(socket: TcpStream) -> Connection {
+impl<RW: AsyncRead + AsyncWrite + Unpin> Connection<RW> {
+    pub fn new(socket: RW) -> Connection<RW> {
         Connection {
             stream: BufWriter::new(socket),
             id: uuid::Uuid::new_v4().to_string(),
         }
     }
 
-    pub async fn run(mut self) -> Result<()> {
+    pub async fn run(&mut self) -> Result<()> {
         let mut authorized = false;
         loop {
-            let mut parser = protocol::Parser::new(self.stream.get_mut());
-            let parsed_ret = parser.recv_and_parse_req(authorized).await;
             let mut reply = Reply::new();
-            match parsed_ret {
-                Ok(req_frame) => {
-                    if req_frame.is_none() {
-                        break;
-                    }
-                    match req_frame.unwrap() {
+            match protocol::Parser::new(self.stream.get_mut()).recv_and_parse_req(authorized).await {
+                Ok(Some(req_frame)) => {
+                    match req_frame {
                         ReqFrame::Auth(req) => {
                             println!("[AUTH-Request] accepted a client {} auth request that info is {:?}", self.id, req);
                             self.reply(reply.auth(0).await?).await?;
@@ -45,6 +40,7 @@ impl Connection {
                         }
                     }
                 }
+                Ok(None) => break,
                 Err(err) => {
                     self.reply(reply.error(&err).await?).await?;
                     return Err(err);
@@ -54,11 +50,9 @@ impl Connection {
         Ok(())
     }
 
-    pub async fn run_on_server(mut self) -> Result<()> {
-        let mut parser = protocol::Parser::new(self.stream.get_mut());
-        let parsed_ret = parser.recv_and_parse_req(true).await;
+    pub async fn run_on_server(&mut self) -> Result<()> {
         let mut reply = Reply::new();
-        match parsed_ret {
+        match protocol::Parser::new(self.stream.get_mut()).recv_and_parse_req(true).await {
             Ok(req) => {
                 if let Some(ReqFrame::Req(req)) = req {
                     self.process(&mut reply, &req, Plat::Server).await?;
@@ -73,21 +67,22 @@ impl Connection {
         }
     }
 
-    async fn process(mut self, reply: &mut Reply, req: &Request, plat: Plat) -> Result<()> {
+    async fn process(&mut self, reply: &mut Reply, req: &Request, plat: Plat) -> Result<()> {
         reply.set_ver(req.ver);
-        let process_ret = self.process_request(&req, plat).await;
-        match process_ret {
+        match self.process_request(&req, plat).await {
             Ok((mut remote, connect_remote)) => {
                 if connect_remote {
                     let raw = req.raw().await?;
                     let mut buffer = BytesMut::from(&raw[..]);
                     remote.write_buf(&mut buffer).await?;
                     remote.flush().await?;
+                    let mut tls_remote = tls::connect(remote, REMOTE_SERVER_DOMAIN).await?;
+                    connect_two_way(self.stream.get_mut(), &mut tls_remote).await?;
                 } else {
                     self.reply(reply.successful((req.a_type, req.dst_addr, req.dst_domain.clone()), req.dst_port).await?).await?;
                     println!("[CONNECT-Reply] {} successful", self.id);
+                    connect_two_way(self.stream.get_mut(), &mut remote).await?;
                 }
-                establish_pipe(self.stream.into_inner(), remote).await;
                 Ok(())
             }
             Err(e) => {
@@ -108,7 +103,7 @@ impl Connection {
                             IpAddr::V4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
                             IpAddr::V6(ip) => ip.is_loopback(),
                         };
-                        if !is_local || true {
+                        if !is_local {
                             return Ok((TcpStream::connect(REMOTE_SERVER_ADDR).await?, true));
                         }
                     }
@@ -138,27 +133,36 @@ impl Connection {
     }
 }
 
+async fn connect_two_way<RW1, RW2>(a: &mut RW1, b: &mut RW2) -> Result<()>
+where
+    RW1: AsyncRead + AsyncWrite + Unpin,
+    RW2: AsyncRead + AsyncWrite + Unpin,
+{
+    let (mut a_reader, mut a_writer) = io::split(a);
+    let (mut b_reader, mut b_writer) = io::split(b);
+    tokio::select! {
+        ret = io::copy( & mut a_reader, & mut b_writer) => {
+            ret ?;
+            b_writer.shutdown().await?;
+        },
+        ret = io::copy( & mut b_reader, & mut a_writer) => {
+            ret ?;
+            a_writer.shutdown().await?;
+        }
+    }
+    Ok(())
+}
+
+#[allow(unused)]
 async fn establish_pipe(a: TcpStream, b: TcpStream) {
     let (mut a_reader, mut a_writer) = a.into_split();
     let (mut b_reader, mut b_writer) = b.into_split();
     tokio::spawn(async move {
-        match io::copy(&mut a_reader, &mut b_writer).await {
-            Ok(n) => {
-                println!("copied bytes {n} data into b from a");
-            }
-            Err(e) => {
-                eprintln!("failed to copy, error: {}", e);
-            }
-        }
+        let _ = io::copy(&mut a_reader, &mut b_writer).await;
+        let _ = b_writer.shutdown().await;
     });
-    match io::copy(&mut b_reader, &mut a_writer).await {
-        Ok(n) => {
-            println!("copied bytes {n} data into a from b");
-        }
-        Err(e) => {
-            eprintln!("failed to copy, error: {}", e);
-        }
-    }
+    let _ = io::copy(&mut b_reader, &mut a_writer).await;
+    let _ = a_writer.shutdown().await;
 }
 
 #[cfg(test)]

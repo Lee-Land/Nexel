@@ -11,7 +11,7 @@ async fn main() -> io::Result<()> {
     loop {
         let (socket, _) = listener.accept().await?;
         tokio::spawn(async move {
-            let conn = Connection::new(socket);
+            let mut conn = Connection::new(socket);
             match conn.run().await {
                 Ok(_) => {}
                 Err(e) => {
