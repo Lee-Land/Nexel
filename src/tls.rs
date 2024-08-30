@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use pki_types::{CertificateDer, PrivateKeyDer};
 use rustls_pemfile::{certs, private_key};
-use tokio::net::{TcpStream};
-use tokio_rustls::{rustls, TlsAcceptor, TlsStream, TlsConnector};
+use tokio::net::TcpStream;
+use tokio_rustls::{rustls, TlsAcceptor, TlsConnector, TlsStream};
 
 fn load_certs(path: &Path) -> io::Result<Vec<CertificateDer<'static>>> {
     certs(&mut BufReader::new(File::open(path)?)).collect()

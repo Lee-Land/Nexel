@@ -1,10 +1,10 @@
-use std::io::{BufRead, Cursor, ErrorKind};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use bytes::{Buf, BytesMut};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
-use url::Url;
 use crate::error::Error;
 use crate::Result;
+use bytes::{Buf, BytesMut};
+use std::io::{BufRead, Cursor, ErrorKind};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
+use url::Url;
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Ver {
@@ -461,7 +461,6 @@ impl BufReader {
             result.push(self.get_u8(src).await?);
             n -= 1;
         }
-        self.buffer.write_buf(&mut BytesMut::from(&result[..])).await?;
         Ok(result)
     }
 
@@ -487,11 +486,9 @@ impl BufReader {
 
 #[cfg(test)]
 mod test {
+    use crate::protocol::{parse_req_v4, AType, BufReader, ReqCmd, Request, Ver};
     use std::io::Cursor;
     use std::net::{IpAddr, Ipv4Addr};
-    use tokio::net::TcpStream;
-    use crate::error::Error;
-    use crate::protocol::{parse_req_http_connect, parse_req_v4, parse_req_v5, AType, BufReader, ReqCmd, Request, Ver};
 
     #[tokio::test] // todo: it tests parsing protocol v4 that is completed
     async fn parse_v4_that_completed() {

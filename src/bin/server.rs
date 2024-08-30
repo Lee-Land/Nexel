@@ -1,8 +1,9 @@
+use nexel::connection::Connection;
+use nexel::{tls};
 use std::net::{Ipv4Addr, SocketAddrV4};
-use tokio::net::{TcpListener};
 use tokio::io;
-use socks_proxy::connection::Connection;
-use socks_proxy::tls;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
@@ -12,16 +13,16 @@ async fn main() -> io::Result<()> {
     let tls_acceptor = tls::acceptor()?;
     loop {
         let (socket, _) = listener.accept().await?;
-        let acceptor = tls_acceptor.clone();
-        let socket = acceptor.accept(socket).await?;
-        tokio::spawn(async move {
-            let mut conn = Connection::new(socket);
-            match conn.run_on_server().await {
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("error on connection run: {}", e);
-                }
-            };
-        });
+        tokio::spawn(run(tls_acceptor.accept(socket).await?));
+    }
+}
+
+async fn run<IO: AsyncRead + AsyncWrite + Unpin>(conn: IO) {
+    let mut conn = Connection::new(conn);
+    match conn.run_on_server().await {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("error on connection run: {}", e);
+        }
     }
 }

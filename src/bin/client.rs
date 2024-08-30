@@ -1,7 +1,7 @@
+use nexel::connection::Connection;
 use std::net::{Ipv4Addr, SocketAddrV4};
-use tokio::net::{TcpListener};
 use tokio::io;
-use socks_proxy::connection::Connection;
+use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {

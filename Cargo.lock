@@ -654,6 +654,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexel"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "lazy_static",
+ "log",
+ "reqwest",
+ "rustls",
+ "rustls-pemfile",
+ "rustls-pki-types",
+ "serde",
+ "tokio",
+ "tokio-rustls",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "nom"
 version = "7.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1149,24 +1167,6 @@ checksum = "ce305eb0b4296696835b71df73eb912e0f1ffd2556a501fcede6e0c50349191c"
 dependencies = [
  "libc",
  "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "socks-proxy"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "lazy_static",
- "log",
- "reqwest",
- "rustls",
- "rustls-pemfile",
- "rustls-pki-types",
- "serde",
- "tokio",
- "tokio-rustls",
- "url",
- "uuid",
 ]
 
 [[package]]

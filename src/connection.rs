@@ -1,12 +1,12 @@
-use std::net::{IpAddr, SocketAddr};
+use crate::env::Plat;
+use crate::error::Error;
+use crate::protocol::{Reply, ReqCmd, ReqFrame, Request};
+use crate::{env, protocol, tls, Result};
 use bytes::BytesMut;
+use std::net::{IpAddr, SocketAddr};
 use tokio::io;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufWriter};
-use tokio::net::{TcpStream};
-use crate::error::Error;
-use crate::{protocol, tls, Result};
-use crate::configuration::{Plat, REMOTE_SERVER_ADDR, REMOTE_SERVER_DOMAIN};
-use crate::protocol::{Reply, ReqCmd, ReqFrame, Request};
+use tokio::net::TcpStream;
 
 pub struct Connection<RW> {
     stream: BufWriter<RW>,
@@ -70,17 +70,17 @@ impl<RW: AsyncRead + AsyncWrite + Unpin> Connection<RW> {
     async fn process(&mut self, reply: &mut Reply, req: &Request, plat: Plat) -> Result<()> {
         reply.set_ver(req.ver);
         match self.process_request(&req, plat).await {
-            Ok((mut remote, connect_remote)) => {
-                if connect_remote {
-                    let mut tls_remote = tls::connect(remote, REMOTE_SERVER_DOMAIN).await?;
+            Ok((mut remote, direct)) => {
+                if direct {
+                    self.reply(reply.successful((req.a_type, req.dst_addr, req.dst_domain.clone()), req.dst_port).await?).await?;
+                    println!("[CONNECT-Reply] {} successful", self.id);
+                    connect_two_way(self.stream.get_mut(), &mut remote).await?;
+                } else {
+                    let mut tls_remote = tls::connect(remote, &env::config().uri()).await?;
                     let mut buffer = BytesMut::from(req.raw());
                     tls_remote.write_buf(&mut buffer).await?;
                     tls_remote.flush().await?;
                     connect_two_way(self.stream.get_mut(), &mut tls_remote).await?;
-                } else {
-                    self.reply(reply.successful((req.a_type, req.dst_addr, req.dst_domain.clone()), req.dst_port).await?).await?;
-                    println!("[CONNECT-Reply] {} successful", self.id);
-                    connect_two_way(self.stream.get_mut(), &mut remote).await?;
                 }
                 Ok(())
             }
@@ -103,16 +103,16 @@ impl<RW: AsyncRead + AsyncWrite + Unpin> Connection<RW> {
                             IpAddr::V6(ip) => ip.is_loopback(),
                         };
                         if !is_local {
-                            return Ok((TcpStream::connect(REMOTE_SERVER_ADDR).await?, true));
+                            return Ok((TcpStream::connect(env::config().uri()).await?, false));
                         }
                     }
-                    Ok((TcpStream::connect(SocketAddr::new(ip, req.dst_port)).await?, false))
+                    Ok((TcpStream::connect(SocketAddr::new(ip, req.dst_port)).await?, true))
                 } else if let Some(domain) = &req.dst_domain {
                     if plat == Plat::Client {
-                        return Ok((TcpStream::connect(REMOTE_SERVER_ADDR).await?, true));
+                        return Ok((TcpStream::connect(env::config().uri()).await?, false));
                     }
                     let addr = format!("{}:{}", domain, req.dst_port);
-                    Ok((TcpStream::connect(addr).await?, false))
+                    Ok((TcpStream::connect(addr).await?, true))
                 } else {
                     Err(Error::AddrTypeUnsupported(req.ver as u8))
                 }
@@ -166,11 +166,12 @@ async fn establish_pipe(a: TcpStream, b: TcpStream) {
 
 #[cfg(test)]
 mod tests {
+    use std::ptr::read;
+    use crate::error::Error;
     use bytes::{Buf, BytesMut};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
     use tokio::select;
-    use crate::error::Error;
 
     #[test]
     fn test_advance_buffer() {
@@ -246,10 +247,20 @@ mod tests {
         let mut read_buf: Vec<u8> = vec![];
         socket.read_buf(&mut read_buf).await.unwrap();
         println!("{:?}", read_buf);
-        let buf: Vec<u8> = vec![5, 1, 0, 1, 0xc0, 0xa8, 1, 1, 0x22, 0xc3];
+        let buf: Vec<u8> = vec![5, 1, 0, 3, 8, 0x6e, 0x65, 0x78, 0x65, 0x6c, 0x2e, 0x63, 0x63, 0x00, 0x50];
         socket.write(buf.as_slice()).await.unwrap();
         let mut read_buf: Vec<u8> = vec![];
         socket.read_buf(&mut read_buf).await.unwrap();
         println!("{:?}", read_buf);
+    }
+
+    #[tokio::test]
+    async fn test_client_proxy_http() {
+        let mut socket = TcpStream::connect("127.0.0.1:3456").await.unwrap();
+        let mut buf = BytesMut::from("CONNECT http://nexel.cc HTTP/1.1\r\n");
+        socket.write_buf(&mut buf).await.unwrap();
+        let mut read_buf: Vec<u8> = vec![];
+        socket.read_buf(&mut read_buf).await.unwrap();
+        println!("{:?}", String::from_utf8_lossy(&read_buf[..]));
     }
 }
