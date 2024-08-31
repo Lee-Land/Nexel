@@ -1,12 +1,13 @@
 use crate::env::Plat;
 use crate::error::Error;
 use crate::protocol::{Reply, ReqCmd, ReqFrame, Request};
-use crate::{env, protocol, tls, Result};
+use crate::{env, protocol, rule, tls, Result};
 use bytes::BytesMut;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{SocketAddr};
 use tokio::io;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufWriter};
 use tokio::net::TcpStream;
+use crate::rule::Routing;
 
 pub struct Connection<RW> {
     stream: BufWriter<RW>,
@@ -76,7 +77,7 @@ impl<RW: AsyncRead + AsyncWrite + Unpin> Connection<RW> {
                     println!("[CONNECT-Reply] {} successful", self.id);
                     connect_two_way(self.stream.get_mut(), &mut remote).await?;
                 } else {
-                    let mut tls_remote = tls::connect(remote, &env::config().uri()).await?;
+                    let mut tls_remote = tls::connect(remote, &env::config().remote_domain()).await?;
                     let mut buffer = BytesMut::from(req.raw());
                     tls_remote.write_buf(&mut buffer).await?;
                     tls_remote.flush().await?;
@@ -96,20 +97,13 @@ impl<RW: AsyncRead + AsyncWrite + Unpin> Connection<RW> {
             ReqCmd::Connect => {
                 println!("[CONNECT-Request] accepted a client {} request that info is {:?}", self.id, req);
                 if let Some(ip) = req.dst_addr {
-                    if plat == Plat::Client {
-                        // todo no local or no in country
-                        let is_local = match ip {
-                            IpAddr::V4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
-                            IpAddr::V6(ip) => ip.is_loopback(),
-                        };
-                        if !is_local {
-                            return Ok((TcpStream::connect(env::config().uri()).await?, false));
-                        }
+                    if plat == Plat::Client && rule::ip(ip) == Routing::Proxy {
+                        return Ok((TcpStream::connect(env::config().remote_uri()).await?, false));
                     }
                     Ok((TcpStream::connect(SocketAddr::new(ip, req.dst_port)).await?, true))
                 } else if let Some(domain) = &req.dst_domain {
-                    if plat == Plat::Client {
-                        return Ok((TcpStream::connect(env::config().uri()).await?, false));
+                    if plat == Plat::Client && rule::domain(domain.as_str()).await? == Routing::Proxy {
+                        return Ok((TcpStream::connect(env::config().remote_uri()).await?, false));
                     }
                     let addr = format!("{}:{}", domain, req.dst_port);
                     Ok((TcpStream::connect(addr).await?, true))

@@ -17,11 +17,11 @@ pub struct EnvConfig {
 }
 
 impl EnvConfig {
-    pub fn domain(&self) -> &str {
+    pub fn remote_domain(&self) -> &str {
         self.remote_server_addr
     }
 
-    pub fn uri(&self) -> String {
+    pub fn remote_uri(&self) -> String {
         format!("{}:{}", self.remote_server_addr, self.remote_server_port)
     }
 }
