@@ -250,7 +250,7 @@ mod tests {
     #[tokio::test]
     async fn test_client_proxy_http() {
         let mut socket = TcpStream::connect("127.0.0.1:3456").await.unwrap();
-        let mut buf = BytesMut::from("CONNECT http://nexel.cc HTTP/1.1\r\n");
+        let mut buf = BytesMut::from("CONNECT nexel.cc HTTP/1.1\r\n\r\n");
         socket.write_buf(&mut buf).await.unwrap();
         let mut read_buf: Vec<u8> = vec![];
         socket.read_buf(&mut read_buf).await.unwrap();

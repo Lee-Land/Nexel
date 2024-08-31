@@ -56,30 +56,6 @@ pub struct Request {
 impl Request {
     pub fn raw(&self) -> &[u8] {
         &self.raw[..]
-        // let mut buf = BufWriter::with_capacity(64, vec![]);
-        // match self.ver {
-        //     Ver::V4 => {
-        //         buf.write_u8(0x04).await?;
-        //         buf.write_u8(self.cmd as u8).await?;
-        //         buf.write_u16(self.dst_port).await?;
-        //         if let IpAddr::V4(ip) = self.dst_addr.unwrap() {
-        //             buf.write_u32(u32::from(ip)).await?
-        //         }
-        //         buf.write_u8(0).await?;
-        //         buf.flush().await?;
-        //         Ok(buf.into_inner())
-        //     }
-        //     Ver::V5 | Ver::Http => {
-        //         buf.write_u8(0x05).await?;
-        //         buf.write_u8(self.cmd as u8).await?;
-        //         buf.write_u8(0).await?;
-        //         buf.write_u8(self.a_type as u8).await?;
-        //         write_addr(&mut buf, (self.a_type, self.dst_addr, self.dst_domain.clone())).await?;
-        //         buf.write_u16(self.dst_port).await?;
-        //         buf.flush().await?;
-        //         Ok(buf.into_inner())
-        //     }
-        // }
     }
 }
 
@@ -277,19 +253,19 @@ impl<RW: AsyncRead + AsyncWrite + Unpin> Parser<'_, RW> {
         match n_ver {
             // socks v4
             4 => {
-                Ok(ReqFrame::Req(parse_req_v4(src, &mut buf_reader).await?))
+                Ok(ReqFrame::Req(parse_req_v4(src, buf_reader).await?))
             }
             // socks v5
             5 => {
                 if !authorized {
                     Ok(ReqFrame::Auth(parse_auth(src, &mut buf_reader).await?))
                 } else {
-                    Ok(ReqFrame::Req(parse_req_v5(src, &mut buf_reader).await?))
+                    Ok(ReqFrame::Req(parse_req_v5(src, buf_reader).await?))
                 }
             }
             // HTTP CONNECT
             b'C' => {
-                Ok(ReqFrame::Req(parse_req_http_connect(src, &mut buf_reader).await?))
+                Ok(ReqFrame::Req(parse_req_http_connect(src, buf_reader).await?))
             }
             _ => Err(Error::VnUnsupported(n_ver)),
         }
@@ -303,7 +279,7 @@ async fn parse_auth(src: &mut Cursor<&[u8]>, buf_reader: &mut BufReader) -> Resu
     })
 }
 
-async fn parse_req_v4(src: &mut Cursor<&[u8]>, buf_reader: &mut BufReader) -> Result<Request> {
+async fn parse_req_v4(src: &mut Cursor<&[u8]>, mut buf_reader: BufReader) -> Result<Request> {
     let n_cmd = buf_reader.get_u8(src).await?;
     let cmd = ReqCmd::from_u8(n_cmd);
     if cmd.is_none() {
@@ -324,11 +300,11 @@ async fn parse_req_v4(src: &mut Cursor<&[u8]>, buf_reader: &mut BufReader) -> Re
         rsv: 0,
         dst_domain: None,
         a_type: AType::Ipv4,
-        raw: buf_reader.buffer().to_vec(),
+        raw: buf_reader.into_inner().await?,
     })
 }
 
-async fn parse_req_v5(src: &mut Cursor<&[u8]>, buf_reader: &mut BufReader) -> Result<Request> {
+async fn parse_req_v5(src: &mut Cursor<&[u8]>, mut buf_reader: BufReader) -> Result<Request> {
     let n_cmd = buf_reader.get_u8(src).await?;
     let cmd = ReqCmd::from_u8(n_cmd);
     if cmd.is_none() {
@@ -336,7 +312,7 @@ async fn parse_req_v5(src: &mut Cursor<&[u8]>, buf_reader: &mut BufReader) -> Re
     }
     let cmd = cmd.unwrap();
     let rsv = buf_reader.get_u8(src).await?; // rsv
-    let (dst_addr, dst_domain, a_type) = get_addr(src, buf_reader).await?;
+    let (dst_addr, dst_domain, a_type) = get_addr(src, &mut buf_reader).await?;
     let dst_port = buf_reader.get_u16(src).await?;
 
     Ok(Request {
@@ -347,11 +323,11 @@ async fn parse_req_v5(src: &mut Cursor<&[u8]>, buf_reader: &mut BufReader) -> Re
         dst_port,
         rsv,
         a_type,
-        raw: buf_reader.buffer().to_vec(),
+        raw: buf_reader.into_inner().await?,
     })
 }
 
-async fn parse_req_http_connect(src: &mut Cursor<&[u8]>, buf_reader: &mut BufReader) -> Result<Request> {
+async fn parse_req_http_connect(src: &mut Cursor<&[u8]>, mut buf_reader: BufReader) -> Result<Request> {
     let line = buf_reader.get_line(src).await?;
     while buf_reader.get_line(src).await?.len() > 0 {}
     let parts: Vec<&str> = line.split(' ').collect();
@@ -373,7 +349,7 @@ async fn parse_req_http_connect(src: &mut Cursor<&[u8]>, buf_reader: &mut BufRea
         dst_port: 80,
         rsv: 0,
         a_type: AType::Domain,
-        raw: buf_reader.buffer().to_vec(),
+        raw: buf_reader.into_inner().await?,
     };
     let parsed_url = parsed_url.unwrap();
     match parsed_url.host() {
@@ -416,8 +392,9 @@ impl BufReader {
             buffer: BufWriter::with_capacity(size, vec![])
         }
     }
-    fn buffer(&mut self) -> &[u8] {
-        self.buffer.buffer()
+    async fn into_inner(mut self) -> Result<Vec<u8>> {
+        self.buffer.flush().await?;
+        Ok(self.buffer.into_inner())
     }
     async fn get_u8(&mut self, src: &mut Cursor<&[u8]>) -> Result<u8> {
         if !src.has_remaining() {
@@ -491,9 +468,10 @@ impl BufReader {
 #[cfg(test)]
 mod test {
     use crate::protocol::{parse_req_http_connect, parse_req_v4, AType, BufReader, ReqCmd, Request, Ver};
-    use std::io::Cursor;
+    use std::io::{BufWriter, Cursor};
     use std::net::{IpAddr, Ipv4Addr};
     use bytes::Buf;
+    use tokio::io::AsyncWriteExt;
     use crate::error::Error;
 
     #[tokio::test] // todo: it tests parsing protocol v4 that is completed
@@ -502,7 +480,7 @@ mod test {
         let mut cursor = Cursor::new(&buf[..]);
         let mut buf_reader = BufReader::with_capacity(64);
         buf_reader.get_u8(&mut cursor).await.unwrap();
-        let ret = parse_req_v4(&mut cursor, &mut buf_reader).await.unwrap();
+        let ret = parse_req_v4(&mut cursor, buf_reader).await.unwrap();
         assert_eq!(ret, Request {
             ver: Ver::V4,
             cmd: ReqCmd::Connect,
@@ -597,8 +575,8 @@ mod test {
     async fn parse_http_req_with_incomplete() {
         let mut cursor = Cursor::new("CONNECT http://nexel.cc HTTP/1.1\r\n".as_bytes());
         cursor.advance(1);
-        let mut buf_reader = BufReader::with_capacity(64);
-        let ret = parse_req_http_connect(&mut cursor, &mut buf_reader).await;
+        let buf_reader = BufReader::with_capacity(64);
+        let ret = parse_req_http_connect(&mut cursor, buf_reader).await;
         match ret {
             Ok(_) => assert!(false),
             Err(e) => {
@@ -611,24 +589,32 @@ mod test {
     }
     #[tokio::test]
     async fn parse_http_req_with_successful() {
-        let req = "CONNECT nexel.cc HTTP/1.1\r\nHost: nexel.cc\r\n\r\n";
+        let req = "CONNECT exp.notion.so:443 HTTP/1.1\r\nHost: exp.notion.so:443\r\nProxy-Connection: keep-alive\r\nUser-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Notion/3.13.0 Chrome/126.0.6478.127 Electron/31.2.0 Safari/537.36 WantsServiceWorker\r\n\r\n";
         let mut cursor = Cursor::new(req.as_bytes());
         let mut buf_reader = BufReader::with_capacity(64);
         buf_reader.get_u8(&mut cursor).await.unwrap();
-        let ret = parse_req_http_connect(&mut cursor, &mut buf_reader).await.unwrap();
+        let ret = parse_req_http_connect(&mut cursor, buf_reader).await.unwrap();
         assert_eq!(ret, Request {
             ver: Ver::Http,
             cmd: ReqCmd::Connect,
             rsv: 0,
-            dst_domain: Some(String::from("nexel.cc")),
-            dst_port: 80,
+            dst_domain: Some(String::from("exp.notion.so")),
+            dst_port: 443,
             dst_addr: None,
             a_type: AType::Domain,
             raw: req.as_bytes().to_vec(),
         });
+        assert_eq!(ret.raw(), req.as_bytes());
     }
     #[test]
     fn parse_host() {
         println!("{}", reqwest::Url::parse("http://nexel.cc").unwrap().host().unwrap())
+    }
+    #[tokio::test]
+    async fn test_buf_writer() {
+        let mut buf = tokio::io::BufWriter::with_capacity(10, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        buf.write_u8(11).await.unwrap();
+        buf.flush().await.unwrap();
+        println!("{:?}", buf.into_inner());
     }
 }
