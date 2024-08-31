@@ -29,7 +29,7 @@ impl<RW: AsyncRead + AsyncWrite + Unpin> Connection<RW> {
             match protocol::Parser::new(self.stream.get_mut()).recv_and_parse_req(authorized).await {
                 Ok(Some(req_frame)) => {
                     match req_frame {
-                        ReqFrame::Auth(req) => {
+                        ReqFrame::Auth(_) => {
                             // println!("[AUTH-Request] accepted a client {} auth request that info is {:?}", self.id, req);
                             self.reply(reply.auth(0).await?).await?;
                             authorized = true;
