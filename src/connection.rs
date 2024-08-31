@@ -160,7 +160,6 @@ async fn establish_pipe(a: TcpStream, b: TcpStream) {
 
 #[cfg(test)]
 mod tests {
-    use std::ptr::read;
     use crate::error::Error;
     use bytes::{Buf, BytesMut};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

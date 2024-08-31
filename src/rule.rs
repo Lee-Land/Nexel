@@ -82,7 +82,7 @@ pub async fn domain(domain: &str) -> crate::Result<Routing> {
         return Ok(routing.clone());
     }
     for (suffix, routing) in domain_suffix_set.lock().unwrap().iter() {
-        if domain.ends_with(suffix) {
+        if domain_ends_with(&domain.to_string(), &suffix) {
             return Ok(routing.clone());
         }
     }
@@ -92,13 +92,26 @@ pub async fn domain(domain: &str) -> crate::Result<Routing> {
         }
     }
 
-    let mut addrs_iter = tokio::net::lookup_host(domain).await?;
+    let mut addrs_iter = tokio::net::lookup_host(format!("{}:{}", domain, 1234)).await?;
 
     if let Some(routing) = addrs_iter.next().map(|ret| ip(ret.ip())) {
         return Ok(routing.clone());
     }
 
     Ok(Routing::Proxy)
+}
+
+fn domain_ends_with(domain: &String, suffix: &String) -> bool {
+    let parts = domain.split('.');
+    let mut segment = String::new();
+    for part in parts.rev() {
+        segment.insert_str(0, part);
+        if segment.eq(suffix) {
+            return true
+        }
+        segment.insert(0, '.');
+    }
+    false
 }
 
 pub fn ip(ip: IpAddr) -> Routing {
@@ -126,11 +139,11 @@ pub fn ip(ip: IpAddr) -> Routing {
 
 #[cfg(test)]
 mod tests {
-    use std::net::IpAddr;
+    use std::net::{IpAddr, Ipv4Addr};
     use std::str::FromStr;
     use std::path::PathBuf;
     use crate::rule;
-    use crate::rule::Routing;
+    use crate::rule::{domain_ends_with, Routing};
 
     #[tokio::test]
     async fn check_domain() {
@@ -138,10 +151,55 @@ mod tests {
         assert_eq!(rule::domain("itunes.apple.com").await.unwrap(), Routing::Proxy);
         assert_eq!(rule::domain("www.163.com").await.unwrap(), Routing::Direct);
         assert_eq!(rule::domain("pan.baidu.com").await.unwrap(), Routing::Direct);
+        assert_eq!(rule::domain("clients4.google.com").await.unwrap(), Routing::Proxy);
+        assert_eq!(rule::domain("javbooks.com").await.unwrap(), Routing::Proxy);
+        assert_eq!(rule::domain("localhost").await.unwrap(), Routing::Direct);
     }
 
     #[test]
     fn check_ip() {
+        rule::initial().unwrap();
+        assert_eq!(rule::ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))), Routing::Direct);
+        assert_eq!(rule::ip(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))), Routing::Direct);
+    }
+
+    #[tokio::test]
+    async fn lookup_domain() {
+        let domain = "www.google.com:80";
+        let ret = tokio::net::lookup_host(domain).await.unwrap().next();
+        println!("{:?}", ret);
+    }
+
+    #[test]
+    fn check_suffix() {
+        let suffix = "google.com";
+        let domain = "clients4.google.com";
+        assert_eq!(domain.ends_with(suffix), true);
+    }
+
+    #[test]
+    fn test_domain_ends_with() {
+        let suffix = "google.com";
+        let domain = "clients4.google.com";
+        assert_eq!(domain_ends_with(&domain.to_string(), &suffix.to_string()), true);
+
+        let suffix = "le.com";
+        let domain = "clients4.google.com";
+        assert_eq!(domain_ends_with(&domain.to_string(), &suffix.to_string()), false);
+
+        let suffix = "s.com";
+        let domain = "javbooks.com";
+        assert_eq!(domain_ends_with(&domain.to_string(), &suffix.to_string()), false);
+    }
+
+    #[test]
+    fn test_rfind() {
+        let domain = "clients4.google.com";
+        assert_eq!(domain.rfind('.'), Some(15));
+    }
+
+    #[test]
+    fn check_ip_2() {
         rule::initial().unwrap();
         assert_eq!(rule::ip("8.220.210.182".parse::<IpAddr>().unwrap()), Routing::Proxy);
     }
