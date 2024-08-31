@@ -154,6 +154,7 @@ mod tests {
         assert_eq!(rule::domain("clients4.google.com").await.unwrap(), Routing::Proxy);
         assert_eq!(rule::domain("javbooks.com").await.unwrap(), Routing::Proxy);
         assert_eq!(rule::domain("localhost").await.unwrap(), Routing::Direct);
+        assert_eq!(rule::domain("www.google.com").await.unwrap(), Routing::Proxy);
     }
 
     #[test]

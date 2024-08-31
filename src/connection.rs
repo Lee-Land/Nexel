@@ -30,7 +30,7 @@ impl<RW: AsyncRead + AsyncWrite + Unpin> Connection<RW> {
                 Ok(Some(req_frame)) => {
                     match req_frame {
                         ReqFrame::Auth(req) => {
-                            println!("[AUTH-Request] accepted a client {} auth request that info is {:?}", self.id, req);
+                            // println!("[AUTH-Request] accepted a client {} auth request that info is {:?}", self.id, req);
                             self.reply(reply.auth(0).await?).await?;
                             authorized = true;
                             continue;

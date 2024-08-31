@@ -151,7 +151,7 @@ impl Reply {
                 self.buffer.write_u16(0).await?;
             }
             Ver::Http => {
-                let response = "HTTP/1.1 400 Connection Failed\r\n";
+                let response = "HTTP/1.1 400 Connection Failed\r\n\r\n";
                 let mut buf = BytesMut::from(response);
                 self.buffer.write_buf(&mut buf).await?;
             }
@@ -178,7 +178,7 @@ impl Reply {
                 self.buffer.write_u16(port).await?;
             }
             Ver::Http => {
-                let response = "HTTP/1.1 200 Connection Established\r\n";
+                let response = "HTTP/1.1 200 Connection Established\r\n\r\n";
                 let mut buf = BytesMut::from(response);
                 self.buffer.write_buf(&mut buf).await?;
             }
@@ -353,11 +353,15 @@ async fn parse_req_v5(src: &mut Cursor<&[u8]>, buf_reader: &mut BufReader) -> Re
 
 async fn parse_req_http_connect(src: &mut Cursor<&[u8]>, buf_reader: &mut BufReader) -> Result<Request> {
     let line = buf_reader.get_line(src).await?;
+    while buf_reader.get_line(src).await?.len() > 0 {}
     let parts: Vec<&str> = line.split(' ').collect();
     if parts.len() != 3 {
         return Err(Error::Other("Bad Request".to_string()));
     }
-    let parsed_url = Url::parse(parts[1]);
+    if parts[0] != "ONNECT" {
+        return Err(Error::UnknownCmd(0));
+    }
+    let parsed_url = Url::parse(format!("{}{}", "http://", parts[1]).as_str());
     if parsed_url.is_err() {
         return Err(Error::Other("Bad Request Url".to_string()));
     }
@@ -480,15 +484,17 @@ impl BufReader {
         if next != b'\n' {
             return Err(Error::Other("broken line".to_string()));
         }
-        Ok(String::from_utf8_lossy(&line[..]).to_string())
+        Ok(String::from_utf8_lossy(&line[..line.len() - 1]).to_string())
     }
 }
 
 #[cfg(test)]
 mod test {
-    use crate::protocol::{parse_req_v4, AType, BufReader, ReqCmd, Request, Ver};
+    use crate::protocol::{parse_req_http_connect, parse_req_v4, AType, BufReader, ReqCmd, Request, Ver};
     use std::io::Cursor;
     use std::net::{IpAddr, Ipv4Addr};
+    use bytes::Buf;
+    use crate::error::Error;
 
     #[tokio::test] // todo: it tests parsing protocol v4 that is completed
     async fn parse_v4_that_completed() {
@@ -542,12 +548,12 @@ mod test {
     //         raw: buf,
     //     });
     // }
-    // #[test] // todo: it tests parsing protocol v5 that completed
-    // fn parse_v5_that_completed_with_domain() {
+    // #[tokio::test] // todo: it tests parsing protocol v5 that completed
+    // async fn parse_v5_that_completed_with_domain() {
     //     let buf: Vec<u8> = vec![5, 1, 0, 3, 0x08, 0x6e, 0x65, 0x78, 0x65, 0x6c, 0x2e, 0x63, 0x63, 0x22, 0xc3];
     //     let mut cursor = Cursor::new(&buf[..]);
     //     cursor.advance(1);
-    //     let ret = parse_req_v5(&mut cursor).unwrap();
+    //     let ret = parse_req_v5(&mut cursor).await.unwrap();
     //     assert_eq!(ret, Request {
     //         ver: Ver::V5,
     //         cmd: ReqCmd::Connect,
@@ -556,6 +562,7 @@ mod test {
     //         dst_addr: None,
     //         dst_port: 8899,
     //         a_type: AType::Domain,
+    //         raw: buf,
     //     });
     // }
     // #[test] // todo: it tests parsing protocol v5 that incomplete
@@ -574,96 +581,54 @@ mod test {
     //         }
     //     }
     // }
-    //
-    // #[tokio::test]
-    // async fn connect_to_domain() {
-    //     match TcpStream::connect("Nexel.cc:80").await {
-    //         Ok(_) => assert!(true),
-    //         Err(_) => assert!(false)
-    //     }
-    // }
-    //
-    // #[test]
-    // fn split() {
-    //     let mut str = "nexel.cc".split(':');
-    //     assert_eq!(str.next(), Some("nexel.cc"));
-    //     assert_eq!(str.next(), None);
-    //
-    //     let mut str = "nexel.cc:".split(':');
-    //     assert_eq!(str.next(), Some("nexel.cc"));
-    //     assert_eq!(str.next(), Some(""));
-    // }
-    //
-    // fn parse_req_http(req: &str) -> crate::Result<Request> {
-    //     let mut cursor = Cursor::new(req.as_bytes());
-    //     parse_req_http_connect(&mut cursor)
-    // }
-    // #[test]
-    // fn parse_http_req() {
-    //     let ret = parse_req_http("CONNECT http://nexel.cc HTTP/1.1\r\n").unwrap();
-    //     assert_eq!(ret, Request {
-    //         ver: Ver::Http,
-    //         cmd: ReqCmd::Connect,
-    //         rsv: 0,
-    //         dst_domain: Some(String::from("nexel.cc")),
-    //         dst_port: 80,
-    //         dst_addr: None,
-    //         a_type: AType::Domain,
-    //     });
-    //
-    //     let ret = parse_req_http("CONNECT http://nexel.cc:443 HTTP/1.1\r\n").unwrap();
-    //     assert_eq!(ret, Request {
-    //         ver: Ver::Http,
-    //         cmd: ReqCmd::Connect,
-    //         rsv: 0,
-    //         dst_domain: Some(String::from("nexel.cc")),
-    //         dst_port: 443,
-    //         dst_addr: None,
-    //         a_type: AType::Domain,
-    //     });
-    //
-    //     let ret = parse_req_http("CONNECT http://192.168.1.1:8080 HTTP/1.1\r\n").unwrap();
-    //     assert_eq!(ret, Request {
-    //         ver: Ver::Http,
-    //         cmd: ReqCmd::Connect,
-    //         rsv: 0,
-    //         dst_domain: None,
-    //         dst_port: 8080,
-    //         dst_addr: Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))),
-    //         a_type: AType::Ipv4,
-    //     });
-    //
-    //     let ret = parse_req_http("CONNECT http://192.168.1.1/path HTTP/1.1\r\n").unwrap();
-    //     assert_eq!(ret, Request {
-    //         ver: Ver::Http,
-    //         cmd: ReqCmd::Connect,
-    //         rsv: 0,
-    //         dst_domain: None,
-    //         dst_port: 80,
-    //         dst_addr: Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))),
-    //         a_type: AType::Ipv4,
-    //     });
-    //
-    //     let ret = parse_req_http("CONNECT http://nexel HTTP/1.1");
-    //     match ret {
-    //         Ok(_) => assert!(false),
-    //         Err(e) => {
-    //             match e {
-    //                 Error::Incomplete => assert!(true),
-    //                 _ => assert!(false),
-    //             }
-    //         }
-    //     }
-    //
-    //     let ret = parse_req_http("CONNECThttp://nexel HTTP/1.1\r\n");
-    //     match ret {
-    //         Ok(_) => assert!(false),
-    //         Err(e) => {
-    //             match e {
-    //                 Error::Other(e) => assert_eq!(e, "Bad Request"),
-    //                 _ => assert!(false),
-    //             }
-    //         }
-    //     }
-    // }
+
+    #[test]
+    fn split() {
+        let mut str = "nexel.cc".split(':');
+        assert_eq!(str.next(), Some("nexel.cc"));
+        assert_eq!(str.next(), None);
+
+        let mut str = "nexel.cc:".split(':');
+        assert_eq!(str.next(), Some("nexel.cc"));
+        assert_eq!(str.next(), Some(""));
+    }
+
+    #[tokio::test]
+    async fn parse_http_req_with_incomplete() {
+        let mut cursor = Cursor::new("CONNECT http://nexel.cc HTTP/1.1\r\n".as_bytes());
+        cursor.advance(1);
+        let mut buf_reader = BufReader::with_capacity(64);
+        let ret = parse_req_http_connect(&mut cursor, &mut buf_reader).await;
+        match ret {
+            Ok(_) => assert!(false),
+            Err(e) => {
+                match e {
+                    Error::Incomplete => assert!(true),
+                    _ => assert!(false),
+                }
+            }
+        }
+    }
+    #[tokio::test]
+    async fn parse_http_req_with_successful() {
+        let req = "CONNECT nexel.cc HTTP/1.1\r\nHost: nexel.cc\r\n\r\n";
+        let mut cursor = Cursor::new(req.as_bytes());
+        let mut buf_reader = BufReader::with_capacity(64);
+        buf_reader.get_u8(&mut cursor).await.unwrap();
+        let ret = parse_req_http_connect(&mut cursor, &mut buf_reader).await.unwrap();
+        assert_eq!(ret, Request {
+            ver: Ver::Http,
+            cmd: ReqCmd::Connect,
+            rsv: 0,
+            dst_domain: Some(String::from("nexel.cc")),
+            dst_port: 80,
+            dst_addr: None,
+            a_type: AType::Domain,
+            raw: req.as_bytes().to_vec(),
+        });
+    }
+    #[test]
+    fn parse_host() {
+        println!("{}", reqwest::Url::parse("http://nexel.cc").unwrap().host().unwrap())
+    }
 }
