@@ -1,3 +1,4 @@
+use std::fmt::{Display, Formatter};
 use crate::error::Error;
 use crate::Result;
 use bytes::{Buf, BytesMut};
@@ -31,6 +32,7 @@ impl ReqCmd {
     }
 }
 
+#[derive(Debug, PartialEq)]
 pub enum ReqFrame {
     Auth(AuthReq),
     Req(Request),
@@ -51,6 +53,13 @@ pub struct Request {
     pub dst_port: u16,
     pub a_type: AType,
     raw: Vec<u8>,
+}
+
+impl Display for Request {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "version: {:?}, cmd: {:?}, dst_domain: {:?}, dst_addr: {:?}, dst_port: {}",
+               self.ver, self.cmd, self.dst_domain, self.dst_addr, self.dst_port)
+    }
 }
 
 impl Request {
@@ -211,64 +220,60 @@ async fn write_addr(writer: &mut BufWriter<Vec<u8>>, addr: (AType, Option<IpAddr
     }
 }
 
-pub struct Parser<'a, RW> {
-    socket: &'a mut RW,
+// todo test
+pub async fn recv_and_parse_req<RW>(io: &mut RW, authorized: bool)
+                                    -> Result<Option<ReqFrame>>
+where
+    RW: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut buffer = BytesMut::with_capacity(128);
+    loop {
+        let mut cursor = Cursor::new(&buffer[..]);
+        if let Some(req) = pre_check_parsing(&mut cursor, authorized).await? {
+            return Ok(Some(req));
+        }
+
+        if 0 == io.read_buf(&mut buffer).await? {
+            return if buffer.is_empty() {
+                Ok(None)
+            } else {
+                Err(Error::IoErr(tokio::io::Error::from(ErrorKind::ConnectionReset)))
+            };
+        }
+    }
 }
-
-impl<RW: AsyncRead + AsyncWrite + Unpin> Parser<'_, RW> {
-    pub fn new(socket: &mut RW) -> Parser<RW> {
-        Parser { socket }
-    }
-    pub async fn recv_and_parse_req(&mut self, authorized: bool) -> Result<Option<ReqFrame>> {
-        let mut buffer = BytesMut::with_capacity(128);
-        loop {
-            let mut cursor = Cursor::new(&buffer[..]);
-            if let Some(req) = self.pre_check_parsing(&mut cursor, authorized).await? {
-                return Ok(Some(req));
-            }
-
-            if 0 == self.socket.read_buf(&mut buffer).await? {
-                return if buffer.is_empty() {
-                    Ok(None)
-                } else {
-                    Err(Error::IoErr(tokio::io::Error::from(ErrorKind::ConnectionReset)))
-                };
+async fn pre_check_parsing(src: &mut Cursor<&[u8]>, authorized: bool) -> Result<Option<ReqFrame>> {
+    match parse_req(src, authorized).await {
+        Ok(req) => { Ok(Some(req)) }
+        Err(err) => {
+            match err {
+                Error::Incomplete => Ok(None),
+                _ => Err(err)
             }
         }
     }
-    async fn pre_check_parsing(&mut self, src: &mut Cursor<&[u8]>, authorized: bool) -> Result<Option<ReqFrame>> {
-        match self.parse_req(src, authorized).await {
-            Ok(req) => { Ok(Some(req)) }
-            Err(err) => {
-                match err {
-                    Error::Incomplete => Ok(None),
-                    _ => Err(err)
-                }
+}
+async fn parse_req(src: &mut Cursor<&[u8]>, authorized: bool) -> Result<ReqFrame> {
+    let mut buf_reader = BufReader::with_capacity(64);
+    let n_ver = buf_reader.get_u8(src).await?;
+    match n_ver {
+        // socks v4
+        4 => {
+            Ok(ReqFrame::Req(parse_req_v4(src, buf_reader).await?))
+        }
+        // socks v5
+        5 => {
+            if !authorized {
+                Ok(ReqFrame::Auth(parse_auth(src, &mut buf_reader).await?))
+            } else {
+                Ok(ReqFrame::Req(parse_req_v5(src, buf_reader).await?))
             }
         }
-    }
-    async fn parse_req(&mut self, src: &mut Cursor<&[u8]>, authorized: bool) -> Result<ReqFrame> {
-        let mut buf_reader = BufReader::with_capacity(64);
-        let n_ver = buf_reader.get_u8(src).await?;
-        match n_ver {
-            // socks v4
-            4 => {
-                Ok(ReqFrame::Req(parse_req_v4(src, buf_reader).await?))
-            }
-            // socks v5
-            5 => {
-                if !authorized {
-                    Ok(ReqFrame::Auth(parse_auth(src, &mut buf_reader).await?))
-                } else {
-                    Ok(ReqFrame::Req(parse_req_v5(src, buf_reader).await?))
-                }
-            }
-            // HTTP CONNECT
-            b'C' => {
-                Ok(ReqFrame::Req(parse_req_http_connect(src, buf_reader).await?))
-            }
-            _ => Err(Error::VnUnsupported(n_ver)),
+        // HTTP CONNECT
+        b'C' => {
+            Ok(ReqFrame::Req(parse_req_http_connect(src, buf_reader).await?))
         }
+        _ => Err(Error::VnUnsupported(n_ver)),
     }
 }
 
@@ -467,11 +472,13 @@ impl BufReader {
 
 #[cfg(test)]
 mod test {
-    use crate::protocol::{parse_req_http_connect, parse_req_v4, AType, BufReader, ReqCmd, Request, Ver};
+    use crate::protocol::{parse_req_http_connect, parse_req_v4, recv_and_parse_req, AType, BufReader, ReqCmd, ReqFrame, Request, Ver};
     use std::io::{BufWriter, Cursor};
     use std::net::{IpAddr, Ipv4Addr};
-    use bytes::Buf;
-    use tokio::io::AsyncWriteExt;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use bytes::{Buf, BufMut};
+    use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
     use crate::error::Error;
 
     #[tokio::test] // todo: it tests parsing protocol v4 that is completed
@@ -616,5 +623,93 @@ mod test {
         buf.write_u8(11).await.unwrap();
         buf.flush().await.unwrap();
         println!("{:?}", buf.into_inner());
+    }
+    struct TestIO {
+        times: usize,
+        half1: Vec<u8>,
+        half2: Vec<u8>,
+        half3: Vec<u8>,
+    }
+
+    impl AsyncWrite for TestIO {
+        fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, std::io::Error>> {
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncRead for TestIO {
+        fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+            if self.times == 0 {
+                buf.put_slice(&self.half1[..]);
+                self.get_mut().times += 1;
+                Poll::Ready(Ok(()))
+            } else if self.times == 1 {
+                buf.put_slice(&self.half2[..]);
+                self.get_mut().times += 1;
+                Poll::Ready(Ok(()))
+            } else {
+                buf.put_slice(&self.half3[..]);
+                Poll::Ready(Ok(()))
+            }
+        }
+    }
+
+    impl Unpin for TestIO {}
+
+    #[tokio::test]
+    async fn poll_read_with_socks_v4() {
+        let mut io = TestIO {
+            times: 0,
+            half1: vec![4, 1, 0x22, 0xc3, 0xc0],
+            half2: vec![0xa8, 1, 1, 0],
+            half3: vec![]
+        };
+        let ret = recv_and_parse_req(&mut io, true).await.unwrap();
+        assert_eq!(ret, Some(ReqFrame::Req(Request {
+            ver: Ver::V4,
+            cmd: ReqCmd::Connect,
+            rsv: 0,
+            dst_domain: None,
+            dst_addr: Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))),
+            dst_port: 8899,
+            a_type: AType::Ipv4,
+            raw: vec![4, 1, 0x22, 0xc3, 0xc0, 0xa8, 1, 1, 0],
+        })))
+    }
+
+    #[tokio::test]
+    async fn poll_read_with_http() {
+        let req1 = "CONNECT nexel.cc:443 HTTP/1.1\r";
+        let req2 = "\nHost: nexel.cc:443\r\n";
+        let req3 = "\r\n";
+        let mut io = TestIO {
+            times: 0,
+            half1: req1.as_bytes().to_vec(),
+            half2: req2.as_bytes().to_vec(),
+            half3: req3.as_bytes().to_vec(),
+        };
+        let ret = recv_and_parse_req(&mut io, true).await.unwrap();
+        let mut raw: Vec<u8> = vec![];
+        raw.put_slice(req1.as_bytes());
+        raw.put_slice(req2.as_bytes());
+        raw.put_slice(req3.as_bytes());
+        assert_eq!(ret, Some(ReqFrame::Req(Request {
+            ver: Ver::Http,
+            cmd: ReqCmd::Connect,
+            rsv: 0,
+            dst_domain: Some(String::from("nexel.cc")),
+            dst_addr: None,
+            dst_port: 443,
+            a_type: AType::Domain,
+            raw,
+        })))
     }
 }

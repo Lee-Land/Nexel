@@ -4,6 +4,7 @@ use crate::protocol::{Reply, ReqCmd, ReqFrame, Request};
 use crate::{env, protocol, rule, tls, Result};
 use bytes::BytesMut;
 use std::net::{SocketAddr};
+use log::{error, info};
 use tokio::io;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufWriter};
 use tokio::net::TcpStream;
@@ -26,11 +27,10 @@ impl<RW: AsyncRead + AsyncWrite + Unpin> Connection<RW> {
         let mut authorized = false;
         loop {
             let mut reply = Reply::new();
-            match protocol::Parser::new(self.stream.get_mut()).recv_and_parse_req(authorized).await {
+            match protocol::recv_and_parse_req(self.stream.get_mut(), authorized).await {
                 Ok(Some(req_frame)) => {
                     match req_frame {
                         ReqFrame::Auth(_) => {
-                            // println!("[AUTH-Request] accepted a client {} auth request that info is {:?}", self.id, req);
                             self.reply(reply.auth(0).await?).await?;
                             authorized = true;
                             continue;
@@ -53,7 +53,7 @@ impl<RW: AsyncRead + AsyncWrite + Unpin> Connection<RW> {
 
     pub async fn run_on_server(&mut self) -> Result<()> {
         let mut reply = Reply::new();
-        match protocol::Parser::new(self.stream.get_mut()).recv_and_parse_req(true).await {
+        match protocol::recv_and_parse_req(self.stream.get_mut(), true).await {
             Ok(req) => {
                 if let Some(ReqFrame::Req(req)) = req {
                     self.process(&mut reply, &req, Plat::Server).await?;
@@ -74,18 +74,20 @@ impl<RW: AsyncRead + AsyncWrite + Unpin> Connection<RW> {
             Ok((mut remote, direct)) => {
                 if direct {
                     self.reply(reply.successful((req.a_type, req.dst_addr, req.dst_domain.clone()), req.dst_port).await?).await?;
-                    println!("[CONNECT-Reply] {} successful", self.id);
+                    info!("[CONNECT-Reply] conn_id = {}, kind = Direct", self.id);
                     connect_two_way(self.stream.get_mut(), &mut remote).await?;
                 } else {
                     let mut tls_remote = tls::connect(remote, &env::config().remote_domain()).await?;
                     let mut buffer = BytesMut::from(req.raw());
                     tls_remote.write_buf(&mut buffer).await?;
                     tls_remote.flush().await?;
+                    info!("[CONNECT-Proxy] conn_id = {}, kind = Proxy", self.id);
                     connect_two_way(self.stream.get_mut(), &mut tls_remote).await?;
                 }
                 Ok(())
             }
             Err(e) => {
+                error!("[CONNECT-Reply] conn_id = {}, kind = failed, error = {}", self.id, e);
                 self.reply(reply.error(&e).await?).await?;
                 Ok(())
             }
@@ -95,7 +97,7 @@ impl<RW: AsyncRead + AsyncWrite + Unpin> Connection<RW> {
     async fn process_request(&self, req: &Request, plat: Plat) -> Result<(TcpStream, bool)> {
         match req.cmd {
             ReqCmd::Connect => {
-                println!("[CONNECT-Request] accepted a client {} request that info is {:?}", self.id, req);
+                info!("[CONNECT-Request] conn_id = {}, Request = {}", self.id, req);
                 if let Some(ip) = req.dst_addr {
                     if plat == Plat::Client && rule::ip(ip) == Routing::Proxy {
                         return Ok((TcpStream::connect(env::config().remote_uri()).await?, false));
@@ -144,18 +146,6 @@ where
         }
     }
     Ok(())
-}
-
-#[allow(unused)]
-async fn establish_pipe(a: TcpStream, b: TcpStream) {
-    let (mut a_reader, mut a_writer) = a.into_split();
-    let (mut b_reader, mut b_writer) = b.into_split();
-    tokio::spawn(async move {
-        let _ = io::copy(&mut a_reader, &mut b_writer).await;
-        let _ = b_writer.shutdown().await;
-    });
-    let _ = io::copy(&mut b_reader, &mut a_writer).await;
-    let _ = a_writer.shutdown().await;
 }
 
 #[cfg(test)]
