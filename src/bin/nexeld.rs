@@ -15,7 +15,7 @@ async fn main() -> io::Result<()> {
         let (socket, _) = listener.accept().await?;
         match tls_acceptor.accept(socket).await {
             Ok(socket) => {
-                tokio::spawn(run(tls_acceptor.accept(socket).await?));
+                tokio::spawn(run(socket));
             },
             Err(e) => {
                 eprintln!("tls has accepted error: {}", e);
