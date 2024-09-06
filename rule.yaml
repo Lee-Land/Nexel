@@ -498,6 +498,7 @@ rules:
   - 'IP-CIDR,220.181.174.226/32,PROXY,no-resolve'
   - 'IP-CIDR,220.181.174.34/32,PROXY,no-resolve'
   - 'DOMAIN,injections.adguard.org,DIRECT'
+  - 'DOMAIN,go.dev,PROXY'
   - 'DOMAIN,local.adguard.org,DIRECT'
   - 'DOMAIN-SUFFIX,local,DIRECT'
   - 'IP-CIDR,127.0.0.0/8,DIRECT'

@@ -30,7 +30,7 @@ async fn main() -> io::Result<()> {
             match conn.run().await {
                 Ok(_) => {}
                 Err(e) => {
-                    log::error!("connection handler run failed: {}", e);
+                    log::error!("connection id {} handler run failed: {}", conn.id(), e);
                 }
             };
         });

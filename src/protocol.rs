@@ -6,6 +6,7 @@ use std::io::{BufRead, Cursor, ErrorKind};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
 use url::Url;
+use tokio::time::{timeout, Duration};
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Ver {
@@ -220,7 +221,6 @@ async fn write_addr(writer: &mut BufWriter<Vec<u8>>, addr: (AType, Option<IpAddr
     }
 }
 
-// todo test
 pub async fn recv_and_parse_req<RW>(io: &mut RW, authorized: bool)
                                     -> Result<Option<ReqFrame>>
 where
@@ -233,13 +233,21 @@ where
             return Ok(Some(req));
         }
 
-        if 0 == io.read_buf(&mut buffer).await? {
-            return if buffer.is_empty() {
-                Ok(None)
-            } else {
-                Err(Error::IoErr(tokio::io::Error::from(ErrorKind::ConnectionReset)))
-            };
+        match timeout(Duration::from_secs(120), io.read_buf(&mut buffer)).await {
+            Ok(n) => {
+                if 0 == n? {
+                    return if buffer.is_empty() {
+                        Ok(None)
+                    } else {
+                        Err(Error::IoErr(tokio::io::Error::from(ErrorKind::ConnectionReset)))
+                    };
+                }
+            }
+            Err(_) => {
+                return Err(Error::Other("read from connection timeout".to_string()));
+            }
         }
+
     }
 }
 async fn pre_check_parsing(src: &mut Cursor<&[u8]>, authorized: bool) -> Result<Option<ReqFrame>> {

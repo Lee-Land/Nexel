@@ -4,10 +4,12 @@ use crate::protocol::{Reply, ReqCmd, ReqFrame, Request};
 use crate::{env, protocol, rule, tls, Result};
 use bytes::BytesMut;
 use std::net::{SocketAddr};
+use std::time::Duration;
 use log::{error, info};
 use tokio::io;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufWriter};
-use tokio::net::TcpStream;
+use tokio::net::{ToSocketAddrs, TcpStream};
+use tokio::time::timeout;
 use crate::rule::Routing;
 
 pub struct Connection<RW> {
@@ -21,6 +23,10 @@ impl<RW: AsyncRead + AsyncWrite + Unpin> Connection<RW> {
             stream: BufWriter::new(socket),
             id: uuid::Uuid::new_v4().to_string(),
         }
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
     }
 
     pub async fn run(&mut self) -> Result<()> {
@@ -100,15 +106,15 @@ impl<RW: AsyncRead + AsyncWrite + Unpin> Connection<RW> {
                 info!("[CONNECT-Request] conn_id = {}, Request = {}", self.id, req);
                 if let Some(ip) = req.dst_addr {
                     if plat == Plat::Client && rule::ip(ip) == Routing::Proxy {
-                        return Ok((TcpStream::connect(env::config().remote_uri()).await?, false));
+                        return Ok((self.timeout_connect(env::config().remote_uri()).await?, false));
                     }
-                    Ok((TcpStream::connect(SocketAddr::new(ip, req.dst_port)).await?, true))
+                    Ok((self.timeout_connect(SocketAddr::new(ip, req.dst_port)).await?, true))
                 } else if let Some(domain) = &req.dst_domain {
                     if plat == Plat::Client && rule::domain(domain.as_str()).await? == Routing::Proxy {
-                        return Ok((TcpStream::connect(env::config().remote_uri()).await?, false));
+                        return Ok((self.timeout_connect(env::config().remote_uri()).await?, false));
                     }
                     let addr = format!("{}:{}", domain, req.dst_port);
-                    Ok((TcpStream::connect(addr).await?, true))
+                    Ok((self.timeout_connect(addr).await?, true))
                 } else {
                     Err(Error::AddrTypeUnsupported(req.ver as u8))
                 }
@@ -125,6 +131,14 @@ impl<RW: AsyncRead + AsyncWrite + Unpin> Connection<RW> {
         self.stream.write(buf).await?;
         self.stream.flush().await?;
         Ok(())
+    }
+
+    async fn timeout_connect<A: ToSocketAddrs>(&self, addr: A) -> Result<TcpStream> {
+        match timeout(Duration::from_secs(120), TcpStream::connect(addr)).await {
+            Ok(Ok(ret)) => Ok(ret),
+            Ok(Err(e)) => Err(Error::IoErr(e)),
+            Err(_) => Err(Error::Other(format!("connection timout, id: {}", self.id))),
+        }
     }
 }
 
@@ -152,6 +166,7 @@ where
 mod tests {
     use crate::error::Error;
     use bytes::{Buf, BytesMut};
+    use serde::de::Unexpected::Bytes;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
     use tokio::select;
@@ -245,5 +260,13 @@ mod tests {
         let mut read_buf: Vec<u8> = vec![];
         socket.read_buf(&mut read_buf).await.unwrap();
         println!("{:?}", String::from_utf8_lossy(&read_buf[..]));
+    }
+
+    #[tokio::test]
+    async fn test_connect_to_remote() {
+        let mut socket = TcpStream::connect("nexel.cc:6789").await.unwrap();
+        let mut buf = BytesMut::from("test");
+        socket.write_buf(&mut buf).await.unwrap();
+        socket.flush().await.unwrap();
     }
 }

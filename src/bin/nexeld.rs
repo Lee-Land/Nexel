@@ -3,7 +3,6 @@ use nexel::{tls};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use log::{error, LevelFilter};
 use tokio::io;
-use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 
 #[tokio::main]
@@ -17,23 +16,20 @@ async fn main() -> io::Result<()> {
     let tls_acceptor = tls::acceptor()?;
     loop {
         let (socket, _) = listener.accept().await?;
-        match tls_acceptor.accept(socket).await {
-            Ok(socket) => {
-                tokio::spawn(run(socket));
+        match tokio::time::timeout(tokio::time::Duration::from_secs(10), tls_acceptor.accept(socket)).await {
+            Ok(Ok(socket)) => {
+                tokio::spawn(async move {
+                    if let Err(e) = Connection::new(socket).run_on_server().await {
+                        error!("Connection handler run failed: {}", e);
+                    }
+                });
+            },
+            Ok(Err(e)) => {
+                error!("TLS handshake has an error: {}", e);
             },
             Err(e) => {
-                error!("tls handler has an error: {}", e);
+                error!("TLS handshake time out, error: {}", e);
             }
-        }
-    }
-}
-
-async fn run<IO: AsyncRead + AsyncWrite + Unpin>(conn: IO) {
-    let mut conn = Connection::new(conn);
-    match conn.run_on_server().await {
-        Ok(_) => {}
-        Err(e) => {
-            error!("connection handler run failed: {}", e);
         }
     }
 }
