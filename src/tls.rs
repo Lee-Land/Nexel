@@ -21,9 +21,9 @@ fn load_key(path: &Path) -> io::Result<PrivateKeyDer<'static>> {
         ))?)
 }
 
-pub fn acceptor() -> io::Result<TlsAcceptor> {
-    let certs = load_certs(&PathBuf::from("certificate.crt"))?;
-    let key = load_key(&PathBuf::from("private.key"))?;
+pub fn acceptor(cert: &String, private_key: &String) -> io::Result<TlsAcceptor> {
+    let certs = load_certs(&PathBuf::from(cert))?;
+    let key = load_key(&PathBuf::from(private_key))?;
     let config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)
@@ -31,9 +31,9 @@ pub fn acceptor() -> io::Result<TlsAcceptor> {
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
 
-pub async fn connect(stream: TcpStream, server_domain: &str) -> io::Result<TlsStream<TcpStream>> {
+pub async fn connect(stream: TcpStream,cert: &str, server_domain: &str) -> io::Result<TlsStream<TcpStream>> {
     let mut root_cert_store = rustls::RootCertStore::empty();
-    let mut pem = BufReader::new(File::open(PathBuf::from("certificate.crt"))?);
+    let mut pem = BufReader::new(File::open(PathBuf::from(cert))?);
     for cert in certs(&mut pem) {
         root_cert_store.add(cert?).unwrap();
     }

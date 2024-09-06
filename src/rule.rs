@@ -45,8 +45,8 @@ lazy_static! {
     };
 }
 
-pub fn initial() -> Result<(), Box<dyn std::error::Error>> {
-    let rule_yaml = std::fs::File::open("rule.yaml")?;
+pub fn initial(rule_yaml: &String) -> Result<(), Box<dyn std::error::Error>> {
+    let rule_yaml = std::fs::File::open(rule_yaml)?;
     let rule: Rule = serde_yml::from_reader(rule_yaml)?;
     for item in rule.rules {
         let mut split_iter = item.split(',');
@@ -107,7 +107,7 @@ fn domain_ends_with(domain: &String, suffix: &String) -> bool {
     for part in parts.rev() {
         segment.insert_str(0, part);
         if segment.eq(suffix) {
-            return true
+            return true;
         }
         segment.insert(0, '.');
     }

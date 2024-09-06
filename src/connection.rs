@@ -1,7 +1,6 @@
-use crate::env::Plat;
 use crate::error::Error;
 use crate::protocol::{Reply, ReqCmd, ReqFrame, Request};
-use crate::{env, protocol, rule, tls, Result};
+use crate::{protocol, rule, tls, Result};
 use bytes::BytesMut;
 use std::net::{SocketAddr};
 use std::time::Duration;
@@ -15,13 +14,42 @@ use crate::rule::Routing;
 pub struct Connection<RW> {
     stream: BufWriter<RW>,
     id: String,
+    proxy_cfg: Option<ProxyCfg>,
+}
+
+#[derive(Clone)]
+pub struct ProxyCfg {
+    proxy_srv_host: String,
+    proxy_srv_port: u16,
+    cert_path: String,
+}
+
+impl ProxyCfg {
+    pub fn new(h: &str, p: u16, cert: &str) -> ProxyCfg {
+        ProxyCfg{
+            proxy_srv_host: h.to_string(),
+            proxy_srv_port: p,
+            cert_path: cert.to_string(),
+        }
+    }
+    pub fn host(&self) -> &str {
+        &self.proxy_srv_host
+    }
+    pub fn addr(&self) -> String {
+        format!("{}:{}", self.proxy_srv_host, self.proxy_srv_port)
+    }
+
+    pub fn cert(&self) -> &str {
+        &self.cert_path
+    }
 }
 
 impl<RW: AsyncRead + AsyncWrite + Unpin> Connection<RW> {
-    pub fn new(socket: RW) -> Connection<RW> {
+    pub fn new(socket: RW, proxy_cfg: Option<ProxyCfg>) -> Connection<RW> {
         Connection {
             stream: BufWriter::new(socket),
             id: uuid::Uuid::new_v4().to_string(),
+            proxy_cfg,
         }
     }
 
@@ -42,7 +70,7 @@ impl<RW: AsyncRead + AsyncWrite + Unpin> Connection<RW> {
                             continue;
                         }
                         ReqFrame::Req(req) => {
-                            self.process(&mut reply, &req, Plat::Client).await?;
+                            self.process(&mut reply, &req).await?;
                             break;
                         }
                     }
@@ -62,7 +90,7 @@ impl<RW: AsyncRead + AsyncWrite + Unpin> Connection<RW> {
         match protocol::recv_and_parse_req(self.stream.get_mut(), true).await {
             Ok(req) => {
                 if let Some(ReqFrame::Req(req)) = req {
-                    self.process(&mut reply, &req, Plat::Server).await?;
+                    self.process(&mut reply, &req).await?;
                     reply.set_ver(req.ver);
                 }
                 Ok(())
@@ -74,21 +102,18 @@ impl<RW: AsyncRead + AsyncWrite + Unpin> Connection<RW> {
         }
     }
 
-    async fn process(&mut self, reply: &mut Reply, req: &Request, plat: Plat) -> Result<()> {
+    async fn process(&mut self, reply: &mut Reply, req: &Request) -> Result<()> {
         reply.set_ver(req.ver);
-        match self.process_request(&req, plat).await {
+        match self.process_request(&req).await {
             Ok((mut remote, direct)) => {
                 if direct {
                     self.reply(reply.successful((req.a_type, req.dst_addr, req.dst_domain.clone()), req.dst_port).await?).await?;
                     info!("[CONNECT-Reply] conn_id = {}, kind = Direct", self.id);
                     connect_two_way(self.stream.get_mut(), &mut remote).await?;
+                } else if self.proxy_cfg.is_none() {
+                    return Err(Error::Other("Proxy configuration not ".to_string()));
                 } else {
-                    let mut tls_remote = tls::connect(remote, &env::config().remote_domain()).await?;
-                    let mut buffer = BytesMut::from(req.raw());
-                    tls_remote.write_buf(&mut buffer).await?;
-                    tls_remote.flush().await?;
-                    info!("[CONNECT-Proxy] conn_id = {}, kind = Proxy", self.id);
-                    connect_two_way(self.stream.get_mut(), &mut tls_remote).await?;
+                    self.proxy(req, remote).await?;
                 }
                 Ok(())
             }
@@ -100,18 +125,39 @@ impl<RW: AsyncRead + AsyncWrite + Unpin> Connection<RW> {
         }
     }
 
-    async fn process_request(&self, req: &Request, plat: Plat) -> Result<(TcpStream, bool)> {
+    async fn proxy(&mut self, req: &Request, mut remote: TcpStream) -> Result<()> {
+        let mut buffer = BytesMut::from(req.raw());
+        let proxy_cfg = self.proxy_cfg.clone().unwrap();
+        if !proxy_cfg.cert().is_empty() {
+            let mut tls_remote = tls::connect(remote, proxy_cfg.cert(), proxy_cfg.host()).await?;
+            tls_remote.write_buf(&mut buffer).await?;
+            tls_remote.flush().await?;
+            info!("[CONNECT-Proxy] conn_id = {}, kind = Proxy", self.id);
+            connect_two_way(self.stream.get_mut(), &mut tls_remote).await
+        } else {
+            remote.write_buf(&mut buffer).await?;
+            remote.flush().await?;
+            info!("[CONNECT-Proxy] conn_id = {}, kind = Proxy", self.id);
+            connect_two_way(self.stream.get_mut(), &mut remote).await
+        }
+    }
+
+    async fn process_request(&self, req: &Request) -> Result<(TcpStream, bool)> {
         match req.cmd {
             ReqCmd::Connect => {
                 info!("[CONNECT-Request] conn_id = {}, Request = {}", self.id, req);
                 if let Some(ip) = req.dst_addr {
-                    if plat == Plat::Client && rule::ip(ip) == Routing::Proxy {
-                        return Ok((self.timeout_connect(env::config().remote_uri()).await?, false));
+                    if let Some(proxy) = &self.proxy_cfg {
+                        if rule::ip(ip) == Routing::Proxy {
+                            return Ok((self.timeout_connect(proxy.addr()).await?, false));
+                        }
                     }
                     Ok((self.timeout_connect(SocketAddr::new(ip, req.dst_port)).await?, true))
                 } else if let Some(domain) = &req.dst_domain {
-                    if plat == Plat::Client && rule::domain(domain.as_str()).await? == Routing::Proxy {
-                        return Ok((self.timeout_connect(env::config().remote_uri()).await?, false));
+                    if let Some(proxy) = &self.proxy_cfg {
+                        if rule::domain(domain.as_str()).await? == Routing::Proxy {
+                            return Ok((self.timeout_connect(proxy.addr()).await?, false));
+                        }
                     }
                     let addr = format!("{}:{}", domain, req.dst_port);
                     Ok((self.timeout_connect(addr).await?, true))
