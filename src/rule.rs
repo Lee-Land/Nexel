@@ -39,13 +39,17 @@ lazy_static! {
     static ref ip_cidr6: Mutex<HashMap<ipnetwork::IpNetwork, Routing>> = Mutex::new(HashMap::new());
     static ref geo_ip: Mutex<HashMap<String, Routing>> = Mutex::new(HashMap::new());
 
-    static ref maxmindb_reader: Mutex<maxminddb::Reader<Vec<u8>>> = {
-        let reader = maxminddb::Reader::open_readfile(PathBuf::from("GeoLite2-Country.mmdb")).unwrap();
-        Mutex::new(reader)
-    };
+    static ref maxmindb_reader: Mutex<Option<maxminddb::Reader<Vec<u8>>>> = Mutex::new(None);
+    // {
+    //     let reader = maxminddb::Reader::open_readfile(PathBuf::from("GeoLite2-Country.mmdb")).unwrap();
+    //     Mutex::new(reader)
+    // };
 }
 
-pub fn initial(rule_yaml: &String) -> Result<(), Box<dyn std::error::Error>> {
+pub fn initial(rule_yaml: &String, maxmindb_path: &String) -> Result<(), Box<dyn std::error::Error>> {
+    let reader = maxminddb::Reader::open_readfile(PathBuf::from(maxmindb_path))?;
+    *maxmindb_reader.lock().unwrap() = Some(reader);
+
     let rule_yaml = std::fs::File::open(rule_yaml)?;
     let rule: Rule = serde_yml::from_reader(rule_yaml)?;
     for item in rule.rules {
@@ -125,11 +129,13 @@ pub fn ip(ip: IpAddr) -> Routing {
         }
     }
 
-    if let Ok(country) =
-        maxmindb_reader.lock().unwrap().lookup::<maxminddb::geoip2::Country>(ip) {
-        if let Some(c) = country.country {
-            if c.iso_code.unwrap_or("_") == "CN" {
-                return Routing::Direct;
+    if let Some(ref mmdb) = *maxmindb_reader.lock().unwrap() {
+        if let Ok(country) =
+            mmdb.lookup::<maxminddb::geoip2::Country>(ip) {
+            if let Some(c) = country.country {
+                if c.iso_code.unwrap_or("_") == "CN" {
+                    return Routing::Direct;
+                }
             }
         }
     }

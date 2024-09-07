@@ -27,6 +27,9 @@ struct Option {
     /// specify rule.yaml file path
     #[argh(option, short = 'r', default = "String::from(\"rule.yaml\")")]
     rule_path: String,
+    /// specify GeoLite2-Country.mmdb file path
+    #[argh(option, short = 'g', default = "String::from(\"GeoLite2-Country.mmdb\")")]
+    mmdb_path: String,
 }
 
 
@@ -35,7 +38,7 @@ async fn main() -> io::Result<()> {
     let op: Option = argh::from_env();
 
     // rule file loading
-    match rule::initial(&op.rule_path) {
+    match rule::initial(&op.rule_path, &op.mmdb_path) {
         Ok(_) => {}
         Err(e) => {
             log::error!("rule initial failed: {}", e.to_string());
