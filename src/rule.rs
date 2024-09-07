@@ -153,7 +153,9 @@ mod tests {
 
     #[tokio::test]
     async fn check_domain() {
-        rule::initial().unwrap();
+        let r = String::from("rule.yaml");
+        let g = String::from("GeoLite2-Country.mmdb");
+        rule::initial(&r, &g).unwrap();
         assert_eq!(rule::domain("itunes.apple.com").await.unwrap(), Routing::Proxy);
         assert_eq!(rule::domain("www.163.com").await.unwrap(), Routing::Direct);
         assert_eq!(rule::domain("pan.baidu.com").await.unwrap(), Routing::Direct);
@@ -165,7 +167,9 @@ mod tests {
 
     #[test]
     fn check_ip() {
-        rule::initial().unwrap();
+        let r = String::from("rule.yaml");
+        let g = String::from("GeoLite2-Country.mmdb");
+        rule::initial(&r, &g).unwrap();
         assert_eq!(rule::ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))), Routing::Direct);
         assert_eq!(rule::ip(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))), Routing::Direct);
     }
@@ -207,14 +211,16 @@ mod tests {
 
     #[test]
     fn check_ip_2() {
-        rule::initial().unwrap();
+        let r = String::from("rule.yaml");
+        let g = String::from("GeoLite2-Country.mmdb");
+        rule::initial(&r, &g).unwrap();
         assert_eq!(rule::ip("8.220.210.182".parse::<IpAddr>().unwrap()), Routing::Proxy);
     }
 
     #[test]
     fn geo_lite_ip() {
         let reader = maxminddb::Reader::open_readfile(PathBuf::from("GeoLite2-Country.mmdb")).unwrap();
-        let ip = "8.220.210.182".parse::<IpAddr>().unwrap();
+        let ip = "20.189.173.26".parse::<IpAddr>().unwrap();
         let county: maxminddb::geoip2::Country = reader.lookup(ip).unwrap();
         println!("{:?}", county);
     }
