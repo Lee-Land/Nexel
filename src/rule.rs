@@ -163,6 +163,7 @@ mod tests {
         assert_eq!(rule::domain("javbooks.com").await.unwrap(), Routing::Proxy);
         assert_eq!(rule::domain("localhost").await.unwrap(), Routing::Direct);
         assert_eq!(rule::domain("www.google.com").await.unwrap(), Routing::Proxy);
+        assert_eq!(rule::domain("th.bing.com").await.unwrap(), Routing::Direct);
     }
 
     #[test]
