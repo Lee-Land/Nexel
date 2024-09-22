@@ -153,7 +153,7 @@ mod tests {
 
     #[tokio::test]
     async fn check_domain() {
-        rule::initial().unwrap();
+        rule::initial(&"rule.yaml".to_string(),&"GeoLite2-Country.mmdb".to_string()).unwrap();
         assert_eq!(rule::domain("itunes.apple.com").await.unwrap(), Routing::Proxy);
         assert_eq!(rule::domain("www.163.com").await.unwrap(), Routing::Direct);
         assert_eq!(rule::domain("pan.baidu.com").await.unwrap(), Routing::Direct);
@@ -161,11 +161,13 @@ mod tests {
         assert_eq!(rule::domain("javbooks.com").await.unwrap(), Routing::Proxy);
         assert_eq!(rule::domain("localhost").await.unwrap(), Routing::Direct);
         assert_eq!(rule::domain("www.google.com").await.unwrap(), Routing::Proxy);
+        assert_eq!(rule::domain("appleid.apple.com").await.unwrap(), Routing::Proxy);
+        assert_eq!(rule::domain("t.me").await.unwrap(), Routing::Proxy);
     }
 
     #[test]
     fn check_ip() {
-        rule::initial().unwrap();
+        rule::initial(&"rule.yaml".to_string(),&"GeoLite2-Country.mmdb".to_string()).unwrap();
         assert_eq!(rule::ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))), Routing::Direct);
         assert_eq!(rule::ip(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))), Routing::Direct);
     }
@@ -207,7 +209,7 @@ mod tests {
 
     #[test]
     fn check_ip_2() {
-        rule::initial().unwrap();
+        rule::initial(&"rule.yaml".to_string(),&"GeoLite2-Country.mmdb".to_string()).unwrap();
         assert_eq!(rule::ip("8.220.210.182".parse::<IpAddr>().unwrap()), Routing::Proxy);
     }
 
