@@ -195,16 +195,16 @@ where
 {
     let (mut a_reader, mut a_writer) = io::split(a);
     let (mut b_reader, mut b_writer) = io::split(b);
-    tokio::select! {
-        ret = io::copy( & mut a_reader, & mut b_writer) => {
-            ret ?;
-            b_writer.shutdown().await?;
-        },
-        ret = io::copy( & mut b_reader, & mut a_writer) => {
-            ret ?;
-            a_writer.shutdown().await?;
-        }
-    }
+
+    let copy_a_to_b = async {
+        let _ = io::copy(&mut a_reader, &mut b_writer).await;
+        let _ = b_writer.shutdown().await;
+    };
+    let copy_b_to_a = async {
+        let _ = io::copy(&mut b_reader, &mut a_writer).await;
+        let _ = a_writer.shutdown().await;
+    };
+    tokio::join!(copy_a_to_b, copy_b_to_a);
     Ok(())
 }
 
