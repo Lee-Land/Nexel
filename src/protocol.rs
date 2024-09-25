@@ -120,7 +120,7 @@ impl Reply {
     pub fn set_ver(&mut self, ver: Ver) {
         self.ver = ver;
     }
-    pub async fn error(&mut self, err: &Error) -> Result<&[u8]> {
+    pub async fn error(&mut self, err: &Error) -> Result<&Vec<u8>> {
         match self.ver {
             Ver::V4 => {
                 self.buffer.write_u8(0).await?;
@@ -142,10 +142,11 @@ impl Reply {
                 self.buffer.write_buf(&mut buf).await?;
             }
         };
-        Ok(self.buffer.buffer())
+        self.buffer.flush().await?;
+        Ok(self.buffer.get_mut())
     }
 
-    pub async fn successful(&mut self, addr: (AType, Option<IpAddr>, Option<String>), port: u16) -> Result<&[u8]> {
+    pub async fn successful(&mut self, addr: (AType, Option<IpAddr>, Option<String>), port: u16) -> Result<&Vec<u8>> {
         match self.ver {
             Ver::V4 => {
                 self.buffer.write_u8(0).await?;
@@ -169,13 +170,15 @@ impl Reply {
                 self.buffer.write_buf(&mut buf).await?;
             }
         };
-        Ok(self.buffer.buffer())
+        self.buffer.flush().await?;
+        Ok(self.buffer.get_mut())
     }
 
-    pub async fn auth(&mut self, n_method: u8) -> Result<&[u8]> {
+    pub async fn auth(&mut self, n_method: u8) -> Result<&Vec<u8>> {
         self.buffer.write_u8(0x05).await?;
         self.buffer.write_u8(n_method).await?;
-        Ok(self.buffer.buffer())
+        self.buffer.flush().await?;
+        Ok(self.buffer.get_mut())
     }
 
     fn get_cmd_by_err(err: &Error) -> ReplyCmd {
@@ -631,6 +634,13 @@ mod test {
         buf.write_u8(11).await.unwrap();
         buf.flush().await.unwrap();
         println!("{:?}", buf.into_inner());
+    }
+    #[tokio::test]
+    async fn test_buf_writer2() {
+        let mut buf = tokio::io::BufWriter::with_capacity(10, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        buf.write_u8(11).await.unwrap();
+        buf.flush().await.unwrap();
+        println!("{:?}", buf.buffer());
     }
     struct TestIO {
         times: usize,
